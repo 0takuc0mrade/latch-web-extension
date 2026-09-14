@@ -5,8 +5,6 @@ import type {
   MultisigDraftMemberRequest,
   StoredAccount,
 } from '@latch/types'
-import { startAuthentication, startRegistration } from '@simplewebauthn/browser'
-
 import {
   assertBeginOptionsRpIdMatchesCanonicalDomain,
   assertRegistrationCeremonyForFinish,
@@ -14,10 +12,9 @@ import {
   formatWebauthnBrowserError,
   narrowAuthenticationOptionsToCredential,
   nextPasskeyRegistrationDisplayName,
-  prepareAuthenticationOptionsForGet,
   prepareRegistrationOptionsForCreate,
 } from '../webauthn/passkey'
-import { openPasskeyBridgeAndWait } from '../webauthn/passkeyBridge'
+import { runWebauthnCredential } from '../webauthn/runWebauthnCredential'
 
 import { friendlyError, sendToBackground } from './backgroundClient'
 import {
@@ -90,24 +87,14 @@ async function runWebauthnRegistration(
   surface: 'popup' | 'sidepanel',
   optionsJSON: unknown
 ): Promise<unknown> {
-  if (surface === 'sidepanel') {
-    return await openPasskeyBridgeAndWait({ mode: 'registration', optionsJSON })
-  }
-  return await startRegistration({
-    optionsJSON: prepareRegistrationOptionsForCreate(optionsJSON),
-  } as Parameters<typeof startRegistration>[0])
+  return await runWebauthnCredential(surface, 'registration', optionsJSON)
 }
 
 async function runWebauthnAuthentication(
   surface: 'popup' | 'sidepanel',
   optionsJSON: unknown
 ): Promise<unknown> {
-  if (surface === 'sidepanel') {
-    return await openPasskeyBridgeAndWait({ mode: 'authentication', optionsJSON })
-  }
-  return await startAuthentication({
-    optionsJSON: prepareAuthenticationOptionsForGet(optionsJSON),
-  } as Parameters<typeof startAuthentication>[0])
+  return await runWebauthnCredential(surface, 'authentication', optionsJSON)
 }
 
 function passkeyMemberFromAccount(

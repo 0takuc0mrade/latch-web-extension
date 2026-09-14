@@ -52,7 +52,7 @@ export async function openApprovalPopup(): Promise<number | undefined> {
 
   try {
     const win = await chrome.windows.create({
-      url: chrome.runtime.getURL('popup.html'),
+      url: chrome.runtime.getURL('popup.html?durable=1'),
       type: 'popup',
       width: 400,
       height: 650,

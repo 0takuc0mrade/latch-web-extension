@@ -8,7 +8,7 @@ import type {
   StoredAccount,
 } from '@latch/types'
 
-import { startAuthentication } from '@simplewebauthn/browser'
+import type { startAuthentication } from '@simplewebauthn/browser'
 
 import { fetchActiveNetwork, networkPassphraseFor } from './activeNetwork'
 import { friendlyError, sendToBackground } from './backgroundClient'
@@ -16,9 +16,8 @@ import {
   assertPasskeyAssertionMatchesAuthDigest,
   buildPasskeySigDataXdrFromAssertion,
   passkeyAuthenticationOptionsForAuthDigest,
-  prepareAuthenticationOptionsForGet,
 } from '../webauthn/passkey'
-import { openPasskeyBridgeAndWait } from '../webauthn/passkeyBridge'
+import { runWebauthnCredential } from '../webauthn/runWebauthnCredential'
 
 export type MultisigApprovalSignerKind = 'passkey' | 'delegated'
 
@@ -26,15 +25,9 @@ async function runPasskeyAuth(
   surface: 'popup' | 'sidepanel',
   optionsJSON: unknown
 ): Promise<Awaited<ReturnType<typeof startAuthentication>>> {
-  if (surface === 'sidepanel') {
-    return (await openPasskeyBridgeAndWait({
-      mode: 'authentication',
-      optionsJSON,
-    })) as Awaited<ReturnType<typeof startAuthentication>>
-  }
-  return await startAuthentication({
-    optionsJSON: prepareAuthenticationOptionsForGet(optionsJSON),
-  } as Parameters<typeof startAuthentication>[0])
+  return (await runWebauthnCredential(surface, 'authentication', optionsJSON)) as Awaited<
+    ReturnType<typeof startAuthentication>
+  >
 }
 
 export function findProposalMember(

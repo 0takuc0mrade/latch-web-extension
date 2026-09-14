@@ -33,11 +33,11 @@ export function SwapTokenCard({
   return (
     <div className="w-full rounded-[18px] bg-[#222121] px-3 py-4">
       <div className="flex w-full flex-col gap-5">
-        <div className="relative z-20 flex items-center justify-between gap-3">
-          <div className="min-w-0 flex-1">
+        <div className="relative z-20 flex w-full items-center justify-between gap-3">
+          <div className="min-w-0 shrink">
             <SwapTokenSelector token={token} onSelect={onTokenSelect} />
           </div>
-          <div className="shrink-0">
+          <div className="min-w-0 flex-1 basis-0">
             <SwapAmountColumn top={amountTop} bottom={amountBottom} mutedTop={mutedAmount} />
           </div>
         </div>

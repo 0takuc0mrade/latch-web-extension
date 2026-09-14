@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { MultisigProposal, MultisigProposalDetail, StoredAccount } from '@latch/types'
 
@@ -13,6 +13,7 @@ import { apiGetProposal } from '../lib/multisigFlow'
 import { MultisigProposalDetailScreen } from '../screens/multisig/MultisigProposalDetailScreen'
 import { MultisigProposalsScreen } from '../screens/multisig/MultisigProposalsScreen'
 import { LatchLoadingOverlay } from '../components/LatchLoadingOverlay'
+import { consumePendingWebauthnFlowIf, ensureDurableWalletUi } from '../webauthn/durableWalletUi'
 
 export function MultisigProposalsViews({
   route,
@@ -36,6 +37,8 @@ export function MultisigProposalsViews({
   const [activeProposal, setActiveProposal] = useState<MultisigProposalDetail | null>(null)
   const [proposalBusy, setProposalBusy] = useState(false)
   const [proposalActionError, setProposalActionError] = useState<string | null>(null)
+  const [autoResumeApprove, setAutoResumeApprove] = useState(false)
+  const skipDurableHandoffRef = useRef(false)
 
   const loadProposals = useCallback(async () => {
     if (!activeAccount?.smartAccountAddress || activeAccount.mode !== 'multisig') return
@@ -58,6 +61,17 @@ export function MultisigProposalsViews({
     }
   }, [activeAccount])
 
+  const loadProposalDetail = useCallback(async (id: string) => {
+    setProposalBusy(true)
+    try {
+      const detail = await apiGetProposal(id)
+      setActiveProposal(detail)
+      setActiveProposalId(id)
+    } finally {
+      setProposalBusy(false)
+    }
+  }, [])
+
   useEffect(() => {
     if (route === 'multisigProposals' || route === 'multisigProposalDetail') {
       void loadProposals()
@@ -68,7 +82,73 @@ export function MultisigProposalsViews({
     if (route !== 'multisigProposalDetail' || !externalProposalId) return
     setProposalActionError(null)
     void loadProposalDetail(externalProposalId)
-  }, [route, externalProposalId])
+  }, [route, externalProposalId, loadProposalDetail])
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const pending = await consumePendingWebauthnFlowIf('multisigApprove')
+      if (cancelled || !pending?.autoResume) return
+      setActiveProposalId(pending.proposalId)
+      onSetRoute('multisigProposalDetail')
+      await loadProposalDetail(pending.proposalId)
+      if (!cancelled) setAutoResumeApprove(true)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [onSetRoute, loadProposalDetail])
+
+  async function runApprove() {
+    if (!activeProposal || !activeAccount) return
+
+    if (!skipDurableHandoffRef.current) {
+      try {
+        const handoff = await ensureDurableWalletUi({
+          surface,
+          pending: {
+            version: 1,
+            kind: 'multisigApprove',
+            route: 'multisigProposalDetail',
+            autoResume: true,
+            createdAt: Date.now(),
+            proposalId: activeProposal.id,
+          },
+        })
+        if (handoff.relocated) return
+      } catch (e) {
+        const raw = e instanceof Error ? e.message : String(e)
+        setProposalActionError(formatMultisigProposalError(raw))
+        return
+      }
+    }
+    skipDurableHandoffRef.current = false
+
+    setProposalBusy(true)
+    setProposalActionError(null)
+    try {
+      const updated = await approveMultisigProposal({
+        proposal: activeProposal,
+        activeAccount,
+        accounts,
+        surface,
+      })
+      setActiveProposal(updated)
+    } catch (e) {
+      const raw = e instanceof Error ? e.message : String(e)
+      setProposalActionError(formatMultisigProposalError(raw))
+    } finally {
+      setProposalBusy(false)
+      void loadProposals()
+    }
+  }
+
+  useEffect(() => {
+    if (!autoResumeApprove || !activeProposal || !activeAccount || proposalBusy) return
+    setAutoResumeApprove(false)
+    skipDurableHandoffRef.current = true
+    void runApprove()
+  }, [autoResumeApprove, activeProposal, activeAccount])
 
   const pendingApprovalCount = useMemo(() => {
     if (!activeAccount?.multisigMemberId) return 0
@@ -89,17 +169,6 @@ export function MultisigProposalsViews({
       accounts,
     })
   }, [activeProposal, activeAccount, accounts])
-
-  async function loadProposalDetail(id: string) {
-    setProposalBusy(true)
-    try {
-      const detail = await apiGetProposal(id)
-      setActiveProposal(detail)
-      setActiveProposalId(id)
-    } finally {
-      setProposalBusy(false)
-    }
-  }
 
   if (route === 'multisigProposals') {
     return (
@@ -137,24 +206,7 @@ export function MultisigProposalsViews({
           approveBusyLabel={proposalApprovalUi?.busyLabel}
           onBack={() => onSetRoute('multisigProposals')}
           onApprove={() => {
-            if (!activeProposal || !activeAccount) return
-            setProposalBusy(true)
-            setProposalActionError(null)
-            void approveMultisigProposal({
-              proposal: activeProposal,
-              activeAccount,
-              accounts,
-              surface,
-            })
-              .then(setActiveProposal)
-              .catch((e) => {
-                const raw = e instanceof Error ? e.message : String(e)
-                setProposalActionError(formatMultisigProposalError(raw))
-              })
-              .finally(() => {
-                setProposalBusy(false)
-                void loadProposals()
-              })
+            void runApprove()
           }}
           onExecute={() => {
             if (!activeProposalId) return

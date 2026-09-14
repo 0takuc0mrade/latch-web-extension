@@ -31,6 +31,7 @@ import {
   prepareRegistrationOptionsForCreate,
 } from '../webauthn/passkey'
 import { runWebauthnCredential } from '../webauthn/runWebauthnCredential'
+import { consumePendingWebauthnFlowIf, ensureDurableWalletUi } from '../webauthn/durableWalletUi'
 import { resolveMainRoute, type Route, type Surface } from '../routing/routes'
 
 const ACCOUNT_ROUTES = new Set([
@@ -99,6 +100,11 @@ export function AccountRouteViews({
   const [passkeyPrefetchReady, setPasskeyPrefetchReady] = useState(false)
   const [passkeyPrefetchError, setPasskeyPrefetchError] = useState<string | null>(null)
   const [passkeyPrefetchNonce, setPasskeyPrefetchNonce] = useState(0)
+  const [autoResumePasskey, setAutoResumePasskey] = useState<
+    null | 'registration' | 'authentication'
+  >(null)
+  const skipDurableHandoffRef = useRef(false)
+  const skipPasskeyPrefetchOnceRef = useRef(false)
 
   async function webauthnCredential(
     mode: 'registration' | 'authentication',
@@ -112,6 +118,11 @@ export function AccountRouteViews({
       passkeyPrefetchRef.current = null
       setPasskeyPrefetchReady(false)
       setPasskeyPrefetchError(null)
+      return
+    }
+
+    if (skipPasskeyPrefetchOnceRef.current) {
+      skipPasskeyPrefetchOnceRef.current = false
       return
     }
 
@@ -221,7 +232,6 @@ export function AccountRouteViews({
 
   async function beginPasskeyRegistration() {
     onSetError(null)
-    onSetLoading('Creating passkey…')
     try {
       const pre = passkeyPrefetchRef.current
       if (!pre || pre.kind !== 'registration') {
@@ -234,6 +244,25 @@ export function AccountRouteViews({
       }
       const optionsJSON = pre.optionsJSON
       assertBeginOptionsRpIdMatchesCanonicalDomain(optionsJSON)
+
+      if (!skipDurableHandoffRef.current) {
+        const handoff = await ensureDurableWalletUi({
+          surface,
+          pending: {
+            version: 1,
+            kind: 'passkeyRegistration',
+            route: route === 'addAccountPasskey' ? 'addAccountPasskey' : 'createPasskey',
+            autoResume: true,
+            createdAt: Date.now(),
+            optionsJSON,
+            displayName: pre.displayName,
+          },
+        })
+        if (handoff.relocated) return
+      }
+      skipDurableHandoffRef.current = false
+
+      onSetLoading('Creating passkey…')
       const reg = (await webauthnCredential('registration', optionsJSON)) as Awaited<
         ReturnType<typeof startRegistration>
       >
@@ -264,7 +293,6 @@ export function AccountRouteViews({
 
   async function loginWithExistingPasskey() {
     onSetError(null)
-    onSetLoading('Logging in with passkey…')
     try {
       const pre = passkeyPrefetchRef.current
       if (!pre || pre.kind !== 'authentication') {
@@ -277,6 +305,24 @@ export function AccountRouteViews({
       }
       const optionsJSON = pre.optionsJSON
       assertBeginOptionsRpIdMatchesCanonicalDomain(optionsJSON)
+
+      if (!skipDurableHandoffRef.current) {
+        const handoff = await ensureDurableWalletUi({
+          surface,
+          pending: {
+            version: 1,
+            kind: 'passkeyAuthentication',
+            route: 'addAccountPasskey',
+            autoResume: true,
+            createdAt: Date.now(),
+            optionsJSON,
+          },
+        })
+        if (handoff.relocated) return
+      }
+      skipDurableHandoffRef.current = false
+
+      onSetLoading('Logging in with passkey…')
       const assertion = (await webauthnCredential('authentication', optionsJSON)) as Awaited<
         ReturnType<typeof startAuthentication>
       >
@@ -308,6 +354,54 @@ export function AccountRouteViews({
       onSetLoading(null)
     }
   }
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const reg = await consumePendingWebauthnFlowIf('passkeyRegistration')
+      if (!cancelled && reg?.autoResume) {
+        skipPasskeyPrefetchOnceRef.current = true
+        passkeyPrefetchRef.current = {
+          kind: 'registration',
+          optionsJSON: reg.optionsJSON,
+          displayName: reg.displayName ?? 'Latch account',
+        }
+        setPasskeyPrefetchReady(true)
+        onSetRoute(reg.route)
+        setAutoResumePasskey('registration')
+        return
+      }
+      const auth = await consumePendingWebauthnFlowIf('passkeyAuthentication')
+      if (!cancelled && auth?.autoResume) {
+        skipPasskeyPrefetchOnceRef.current = true
+        passkeyPrefetchRef.current = {
+          kind: 'authentication',
+          optionsJSON: auth.optionsJSON,
+        }
+        setPasskeyPrefetchReady(true)
+        onSetRoute(auth.route)
+        setAutoResumePasskey('authentication')
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [onSetRoute])
+
+  useEffect(() => {
+    if (!autoResumePasskey || !passkeyPrefetchReady) return
+    const mode = autoResumePasskey
+    setAutoResumePasskey(null)
+    skipDurableHandoffRef.current = true
+    void (async () => {
+      try {
+        if (mode === 'registration') await beginPasskeyRegistration()
+        else await loginWithExistingPasskey()
+      } catch (e) {
+        onSetError(e instanceof Error ? e.message : String(e))
+      }
+    })()
+  }, [autoResumePasskey, passkeyPrefetchReady])
 
   // Keep mounted for passkey prefetch when on relevant routes; skip unrelated routes.
   if (!ACCOUNT_ROUTES.has(route as string)) return null

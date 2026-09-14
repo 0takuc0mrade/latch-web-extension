@@ -24,13 +24,13 @@ export function SwapTokenSelector({
     >
       <SwapTokenAvatar token={token} />
       <div className="flex min-w-0 flex-col gap-2">
-        <div className="flex items-center gap-2 whitespace-nowrap">
-          <span className="shrink-0 text-lg font-semibold tracking-[-0.36px] text-[#fcfcfc]">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-lg font-semibold tracking-[-0.36px] text-[#fcfcfc]">
             {token.name}
           </span>
           <img src={chevronDownIconUrl} alt="" className="size-6 shrink-0" aria-hidden />
         </div>
-        <span className="whitespace-nowrap text-sm tracking-[-0.28px] text-muted">
+        <span className="truncate text-sm tracking-[-0.28px] text-muted">
           {tokenSubtitle(token)}
         </span>
       </div>
