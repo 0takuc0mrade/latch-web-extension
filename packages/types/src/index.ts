@@ -789,6 +789,12 @@ export type MessageType =
   | 'GET_SWAP_QUOTE'
   | 'PREPARE_SWAP_TX'
   | 'SETUP_SWAP_RULES'
+  | 'RUN_PASSKEY_BRIDGE'
+  | 'SIGN_PASSKEY_BUILT_TX'
+  | 'EXECUTE_SWAP_CONFIRM'
+  | 'EXECUTE_SEND_SUBMIT'
+  | 'EXECUTE_DAPP_EXTERNAL_SIGN'
+  | 'EXECUTE_MULTISIG_PASSKEY_APPROVE'
   | 'RECORD_KNOWN_SAC_PROBE'
   | 'MULTISIG_CREATE_DRAFT'
   | 'MULTISIG_GET_ACTIVE_DRAFT'
@@ -930,6 +936,56 @@ export type BackgroundRequestPayloadByType = {
   GET_SWAP_QUOTE: import('./swap').GetSwapQuoteRequest
   PREPARE_SWAP_TX: import('./swap').PrepareSwapTxRequest
   SETUP_SWAP_RULES: import('./swap').SetupSwapRulesRequest
+  RUN_PASSKEY_BRIDGE: {
+    mode: 'registration' | 'authentication'
+    optionsJSON: unknown
+    timeoutMs?: number
+  }
+  SIGN_PASSKEY_BUILT_TX: {
+    accountId: string
+    signingAccountId?: string
+    build: BuildSendTxResponse
+    submit?: boolean
+    surface?: 'popup' | 'sidepanel'
+    outcomeKind?: 'swap' | 'send' | 'dapp' | 'multisigApprove'
+  }
+  EXECUTE_SWAP_CONFIRM: {
+    accountId: string
+    quote: import('./swap').SwapQuotePayload
+    surface: 'popup' | 'sidepanel'
+    outcomePayload?: Record<string, unknown>
+  }
+  EXECUTE_SEND_SUBMIT: {
+    accountId: string
+    draft: {
+      token: SmartAccountBalanceRow | null
+      recipientAddress: string
+      recipientName?: string
+      amount: string
+      inputMode: 'crypto' | 'fiat'
+      memo?: string
+    }
+    sendTokenPriceUsd: number | null
+    network: Network
+    surface: 'popup' | 'sidepanel'
+    outcomePayload?: Record<string, unknown>
+  }
+  EXECUTE_DAPP_EXTERNAL_SIGN: {
+    requestId: string
+    accountId: string
+    prepared: BuildSendTxResponse
+    submit: boolean
+    surface: 'popup' | 'sidepanel'
+  }
+  EXECUTE_MULTISIG_PASSKEY_APPROVE: {
+    accountId: string
+    proposalId: string
+    memberId: string
+    authDigestHex: string
+    memberCredentialId?: string
+    surface: 'popup' | 'sidepanel'
+    outcomePayload?: Record<string, unknown>
+  }
   RECORD_KNOWN_SAC_PROBE: RecordKnownSacProbeRequest
   MULTISIG_CREATE_DRAFT: undefined
   MULTISIG_GET_ACTIVE_DRAFT: undefined
@@ -1078,6 +1134,24 @@ export type BackgroundResponseDataByType = {
   GET_SWAP_QUOTE: import('./swap').GetSwapQuoteResponse
   PREPARE_SWAP_TX: import('./swap').PrepareSwapTxResponse
   SETUP_SWAP_RULES: import('./swap').SetupSwapRulesResponse
+  RUN_PASSKEY_BRIDGE: unknown
+  SIGN_PASSKEY_BUILT_TX: SubmitTxResponse
+  EXECUTE_SWAP_CONFIRM: {
+    prepared: import('./swap').PrepareSwapTxResponse
+    submit: SubmitTxResponse
+  }
+  EXECUTE_SEND_SUBMIT: {
+    status: 'success'
+    hash?: string
+    submittedAt: string
+  }
+  EXECUTE_DAPP_EXTERNAL_SIGN: {
+    signedTxXdr?: string
+    signedAuthEntry?: string
+    txHash?: string
+    submitData?: SubmitTxResponse
+  }
+  EXECUTE_MULTISIG_PASSKEY_APPROVE: import('./multisig').MultisigProposalDetail
   RECORD_KNOWN_SAC_PROBE: undefined
   MULTISIG_CREATE_DRAFT: import('./multisig').CreateMultisigDraftResponse
   MULTISIG_GET_ACTIVE_DRAFT: import('./multisig').GetActiveMultisigDraftResponse

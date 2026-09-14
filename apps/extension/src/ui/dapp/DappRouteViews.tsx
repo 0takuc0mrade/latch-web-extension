@@ -9,19 +9,10 @@ import type {
 
 import { GrantAccessScreen } from '../screens/dapp/GrantAccessScreen'
 import { ExternalSignReviewScreen } from '../screens/dapp/ExternalSignReviewScreen'
-import {
-  extractTransactionHash,
-  signAndSubmitBuiltTx,
-  signWithoutSubmitBuiltTx,
-} from '../lib/signBuiltTx'
-import { sendToBackground } from '../lib/backgroundClient'
+import { friendlyError, sendToBackground } from '../lib/backgroundClient'
+import { clearPendingWalletOutcome, writePendingWalletOutcome } from '../../lib/walletOutcome'
 import { openOnboardingTab } from '../onboarding/openOnboardingTab'
 import type { Route, Surface } from '../routing/routes'
-import {
-  consumePendingWebauthnFlowIf,
-  ensureDurableWalletUi,
-  isDurableHandoffActive,
-} from '../webauthn/durableWalletUi'
 
 export function DappRouteViews({
   route,
@@ -52,8 +43,6 @@ export function DappRouteViews({
   const [dappBusy, setDappBusy] = useState(false)
   const [dappError, setDappError] = useState<string | null>(null)
   const [dappProgressLabel, setDappProgressLabel] = useState<string | null>(null)
-  const [autoResumeDappConfirm, setAutoResumeDappConfirm] = useState(false)
-  const skipDurableHandoffRef = useRef(false)
   const pendingDappRequestsRef = useRef(pendingDappRequests)
   pendingDappRequestsRef.current = pendingDappRequests
   const [dappNetwork, setDappNetwork] = useState<'testnet' | 'mainnet'>('testnet')
@@ -139,115 +128,86 @@ export function DappRouteViews({
     // Listener is stable; deps intentionally empty.
   }, [])
 
-  // Action popup / side panel close must reject pending reviews — unless we are
-  // handing off to a durable window for WebAuthn (focus loss is expected).
+  // Action popup / side panel close must reject pending reviews.
   useEffect(() => {
     function dismissPendingOnClose() {
-      void (async () => {
-        if (await isDurableHandoffActive()) return
-        const pending = pendingDappRequestsRef.current
-        if (pending.length === 0) return
-        for (const req of pending) {
-          void chrome.runtime.sendMessage({
-            type: 'RESOLVE_PENDING_DAPP_REQUEST',
-            payload: { requestId: req.id, approved: false },
-          } satisfies BackgroundMessage<{ requestId: string; approved: boolean }>)
-        }
-      })()
+      const pending = pendingDappRequestsRef.current
+      if (pending.length === 0) return
+      for (const req of pending) {
+        void chrome.runtime.sendMessage({
+          type: 'RESOLVE_PENDING_DAPP_REQUEST',
+          payload: { requestId: req.id, approved: false },
+        } satisfies BackgroundMessage<{ requestId: string; approved: boolean }>)
+      }
     }
     window.addEventListener('pagehide', dismissPendingOnClose)
     return () => window.removeEventListener('pagehide', dismissPendingOnClose)
   }, [])
 
-  useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      const pending = await consumePendingWebauthnFlowIf('dappApproval')
-      if (cancelled || !pending?.autoResume) return
-      onSetRoute('dappApproval')
-      setAutoResumeDappConfirm(true)
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [onSetRoute])
-
   async function confirmExternalSign(req: PendingDappRequest) {
     if (!req.prepared || !activeAccount) return
     if (req.localReview?.confirmBlocked) return
 
-    if (!skipDurableHandoffRef.current) {
-      try {
-        const handoff = await ensureDurableWalletUi({
-          surface,
-          pending: {
-            version: 1,
-            kind: 'dappApproval',
-            route: 'dappApproval',
-            autoResume: true,
-            createdAt: Date.now(),
-          },
-        })
-        if (handoff.relocated) return
-      } catch (e) {
-        setDappError(e instanceof Error ? e.message : String(e))
-        return
-      }
-    }
-    skipDurableHandoffRef.current = false
-
     setDappBusy(true)
     setDappError(null)
     try {
-      if (req.signRequest?.submit === false) {
-        const { signedTxXdr, signedAuthEntry } = await signWithoutSubmitBuiltTx({
-          build: req.prepared,
-          activeAccount,
-          surface,
-          onProgress: setDappProgressLabel,
+      if (surface === 'popup') {
+        await writePendingWalletOutcome({
+          kind: 'dapp',
+          status: 'in_progress',
+          payload: { requestId: req.id },
         })
-        await resolvePendingDapp(req, true, {
-          signedTxXdr,
-          signedAuthEntry,
-        })
-        return
       }
-      const submitData = await signAndSubmitBuiltTx({
-        build: req.prepared,
-        activeAccount,
-        surface,
-        onProgress: setDappProgressLabel,
+
+      const submit = req.signRequest?.submit !== false
+      const res = await sendToBackground<
+        {
+          requestId: string
+          accountId: string
+          prepared: NonNullable<PendingDappRequest['prepared']>
+          submit: boolean
+          surface: Surface
+        },
+        {
+          signedTxXdr?: string
+          signedAuthEntry?: string
+          txHash?: string
+        }
+      >({
+        type: 'EXECUTE_DAPP_EXTERNAL_SIGN',
+        payload: {
+          requestId: req.id,
+          accountId: activeAccount.id,
+          prepared: req.prepared,
+          submit,
+          surface,
+        },
       })
-      const txHash = extractTransactionHash(submitData)
-      await resolvePendingDapp(req, true, { txHash })
+      if (!res.ok) throw new Error(friendlyError(res.error))
+
+      setDappBusy(false)
+      setDappProgressLabel(null)
+      setDappError(null)
+      await clearPendingWalletOutcome()
+      await loadPendingDapp()
+      if (pendingDappRequests.length <= 1) {
+        onSetRoute(accountsLength > 0 ? 'home' : 'home')
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
-      try {
-        await resolvePendingDapp(req, false, {
-          errorMessage: message,
-          errorCode: 'sign_failed',
-        })
-        onSetError(message)
-      } catch {
-        setDappError(message)
-        setDappBusy(false)
-        setDappProgressLabel(null)
+      onSetError(message)
+      setDappError(message)
+      setDappBusy(false)
+      setDappProgressLabel(null)
+      if (surface === 'popup') {
+        await writePendingWalletOutcome({
+          kind: 'dapp',
+          status: 'failure',
+          error: message,
+        }).catch(() => {})
       }
     }
   }
-
-  useEffect(() => {
-    if (!autoResumeDappConfirm || !activeAccount) return
-    const req = pendingDappRequests[0]
-    if (!req?.prepared || req.kind !== 'externalSignReview') return
-    if (req.localReview?.confirmBlocked) {
-      setAutoResumeDappConfirm(false)
-      return
-    }
-    setAutoResumeDappConfirm(false)
-    skipDurableHandoffRef.current = true
-    void confirmExternalSign(req)
-  }, [autoResumeDappConfirm, pendingDappRequests, activeAccount])
 
   if (loading || route !== 'dappApproval') return null
 

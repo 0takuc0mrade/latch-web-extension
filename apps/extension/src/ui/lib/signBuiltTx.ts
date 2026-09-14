@@ -8,24 +8,13 @@ import type {
   SubmitWebauthnTxRequest,
 } from '@latch/types'
 
-import type { startAuthentication } from '@simplewebauthn/browser'
-
 import { resolveDelegatedAuthEntryForSigner } from '../../lib/delegatedAuthSubmit'
-import {
-  assertPasskeyAssertionMatchesAuthDigest,
-  buildPasskeySigDataXdrFromAssertion,
-  enrichWebauthnRpIdHashErrorMessage,
-  passkeyAuthenticationOptionsForAuthDigest,
-} from '../webauthn/passkey'
-import { runWebauthnCredential } from '../webauthn/runWebauthnCredential'
 import {
   contextRuleIdForSubmit,
   delegatedSubmitFields,
   isDelegatedSendBuild,
-  multiAuthSubmitFields,
   normalizeDelegatedBuildFields,
-  resolvePasskeyAuthEntryXdr,
-} from './sendTx'
+} from '../../lib/sendBuildFields'
 import { friendlyError, sendToBackground } from './backgroundClient'
 import { fetchActiveNetwork, networkPassphraseFor } from './activeNetwork'
 
@@ -44,15 +33,6 @@ export function extractSignedTxXdr(data: SubmitTxResponse | null | undefined): s
   return undefined
 }
 
-async function runPasskeyAuth(
-  surface: 'popup' | 'sidepanel',
-  optionsJSON: unknown
-): Promise<Awaited<ReturnType<typeof startAuthentication>>> {
-  return (await runWebauthnCredential(surface, 'authentication', optionsJSON)) as Awaited<
-    ReturnType<typeof startAuthentication>
-  >
-}
-
 export async function signAndSubmitBuiltTx(args: {
   build: BuildSendTxResponse
   activeAccount: StoredAccount
@@ -69,11 +49,8 @@ export async function signAndSubmitBuiltTx(args: {
 }): Promise<SubmitTxResponse> {
   const { build: rawBuild, activeAccount } = args
   const build = normalizeDelegatedBuildFields(rawBuild)
-  const surface = args.surface ?? 'popup'
   const progress = args.onProgress ?? (() => {})
   const submit = args.submit
-  const passkeySource =
-    activeAccount.mode === 'multisig' ? (args.signingAccount ?? activeAccount) : activeAccount
   const { network } = await fetchActiveNetwork()
   const networkPassphrase = networkPassphraseFor(network)
 
@@ -118,56 +95,29 @@ export async function signAndSubmitBuiltTx(args: {
     return submitRes.data ?? {}
   }
 
-  if (!passkeySource.passkeyCredentialId || !passkeySource.passkeyKeyDataHex) {
-    throw new Error(
-      activeAccount.mode === 'multisig'
-        ? 'No passkey account is available to sign for this multisig wallet. Sign in with your Latch passkey, then try again.'
-        : 'This account is missing its passkey signing data on this device. Log out and sign in again with your Latch passkey to restore it, then retry.'
-    )
-  }
-  if (
-    isDelegatedSendBuild(build) &&
-    (build.submitMethod === 'delegated' || build.submitMethod === 'bundler-delegated')
-  ) {
-    throw new Error(
-      'This smart account authorizes swaps via a delegated G-address, not your passkey. ' +
-        'Import the seed phrase for the delegated signer G-address, or log out and sign in with passkey to run one-time swap setup.'
-    )
-  }
-  if (!build.authDigestHex?.trim()) {
-    throw new Error('Missing auth digest from transaction build.')
-  }
-  const optionsJSON = passkeyAuthenticationOptionsForAuthDigest({
-    credentialId: passkeySource.passkeyCredentialId,
-    authDigestHex: build.authDigestHex,
-  })
   progress('Signing…')
-  const assertion = await runPasskeyAuth(surface, optionsJSON)
-  assertPasskeyAssertionMatchesAuthDigest(assertion, build.authDigestHex)
-  const sigDataXdr = buildPasskeySigDataXdrFromAssertion(assertion)
-  progress(submit === false ? 'Preparing…' : 'Submitting…')
-  const submitRes = await sendToBackground<SubmitWebauthnTxRequest, SubmitTxResponse>({
-    type: 'SUBMIT_TX_WEBAUTHN',
+  const signRes = await sendToBackground<
+    {
+      accountId: string
+      signingAccountId?: string
+      build: BuildSendTxResponse
+      submit?: boolean
+      surface?: 'popup' | 'sidepanel'
+    },
+    SubmitTxResponse
+  >({
+    type: 'SIGN_PASSKEY_BUILT_TX',
     payload: {
-      txXdr: build.txXdr,
-      authEntryXdr: resolvePasskeyAuthEntryXdr(build),
-      sigDataXdr,
-      keyDataHex: passkeySource.passkeyKeyDataHex,
-      contextRuleId: contextRuleIdForSubmit(build),
+      accountId: activeAccount.id,
+      signingAccountId: args.signingAccount?.id,
+      build,
       submit,
-      ...multiAuthSubmitFields(build),
+      surface: args.surface,
     },
   })
-  if (!submitRes.ok) {
-    const errMsg = friendlyError(submitRes.error)
-    throw new Error(
-      await enrichWebauthnRpIdHashErrorMessage(errMsg, {
-        optionsJSON,
-        credentialResponse: assertion,
-      })
-    )
-  }
-  return submitRes.data ?? {}
+  if (!signRes.ok) throw new Error(friendlyError(signRes.error))
+  progress(submit === false ? 'Preparing…' : 'Submitting…')
+  return signRes.data ?? {}
 }
 
 /**
@@ -183,3 +133,6 @@ export async function signWithoutSubmitBuiltTx(
   const signedAuthEntry = typeof res.signedAuthEntry === 'string' ? res.signedAuthEntry : undefined
   return { signedTxXdr, signedAuthEntry }
 }
+
+// Re-export for callers that imported submit field helpers via this module historically.
+export type { SubmitWebauthnTxRequest }

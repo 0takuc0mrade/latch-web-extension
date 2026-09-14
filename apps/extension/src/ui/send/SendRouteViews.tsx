@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useState } from 'react'
 
 import type {
   BuildSendTxRequest,
@@ -11,13 +11,16 @@ import type {
 
 import { SendFlow } from '../screens/send/SendFlow'
 import { saveToAddressBook } from '../screens/send/useAddressBook'
-import { executeSendWithSetupLoop } from '../lib/executeSend'
 import { createMultisigSendProposalWithSetup } from '../lib/multisigProposal'
 import { enrichSendFailureDetail, buildSendRequestFromDraft } from '../lib/sendTx'
-import { sendToBackground } from '../lib/backgroundClient'
+import { friendlyError, sendToBackground } from '../lib/backgroundClient'
+import {
+  clearPendingWalletOutcome,
+  consumePendingWalletOutcomeIf,
+  writePendingWalletOutcome,
+} from '../../lib/walletOutcome'
 import { INITIAL_SEND_DRAFT, type SendDraft, type SendResult, type SendStep } from '../types/send'
 import type { Route, Surface } from '../routing/routes'
-import { consumePendingWebauthnFlowIf, ensureDurableWalletUi } from '../webauthn/durableWalletUi'
 
 export function SendRouteViews({
   route,
@@ -62,8 +65,6 @@ export function SendRouteViews({
   const [sendProgressLabel, setSendProgressLabel] = useState<string | null>(null)
   const [sendError, setSendError] = useState<string | null>(null)
   const [sendTokenPriceUsd, setSendTokenPriceUsd] = useState<number | null>(null)
-  const [autoResumeSend, setAutoResumeSend] = useState(false)
-  const skipDurableHandoffRef = useRef(false)
 
   function resetSendFlow() {
     setSendDraft(INITIAL_SEND_DRAFT)
@@ -130,36 +131,36 @@ export function SendRouteViews({
     }
   }, [activeAccount, sendDraft, sendTokenPriceUsd, activeNetwork])
 
-  async function handleSubmitSend() {
-    if (!skipDurableHandoffRef.current) {
-      try {
-        const handoff = await ensureDurableWalletUi({
-          surface,
-          pending: {
-            version: 1,
-            kind: 'sendSubmit',
-            route: 'send',
-            autoResume: true,
-            createdAt: Date.now(),
-            draft: sendDraft,
-            sendStep: 'summary',
-            sendTokenPriceUsd,
-          },
-        })
-        if (handoff.relocated) return
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e)
+  useEffect(() => {
+    void (async () => {
+      const outcome = await consumePendingWalletOutcomeIf('send')
+      if (!outcome || outcome.status === 'in_progress') return
+      const payload = outcome.payload ?? {}
+      if (payload.draft) setSendDraft(payload.draft as SendDraft)
+      if (typeof payload.sendTokenPriceUsd === 'number' || payload.sendTokenPriceUsd === null) {
+        setSendTokenPriceUsd(payload.sendTokenPriceUsd as number | null)
+      }
+      setSendProgressLabel(null)
+      if (outcome.status === 'success') {
+        const result = (payload.result as SendResult | undefined) ?? {
+          status: 'success' as const,
+          submittedAt: new Date().toISOString(),
+        }
+        setSendResult(result)
+        setSendStep('success')
+        void onLoadPortfolio()
+      } else {
         setSendResult({
           status: 'failure',
-          errorMessage: message,
+          errorMessage: outcome.error ?? 'Send failed.',
           submittedAt: new Date().toISOString(),
         })
         setSendStep('failure')
-        return
       }
-    }
-    skipDurableHandoffRef.current = false
+    })()
+  }, [onLoadPortfolio])
 
+  async function handleSubmitSend() {
     setSendError(null)
     setSendProgressLabel('Building…')
     try {
@@ -185,16 +186,46 @@ export function SendRouteViews({
       }
 
       if (!activeAccount) throw new Error('No active account')
-      const result = await executeSendWithSetupLoop({
+
+      const outcomePayload = {
         draft: sendDraft,
-        activeAccount,
         sendTokenPriceUsd,
-        activeNetwork,
-        surface,
-        onProgress: setSendProgressLabel,
+      }
+      if (surface === 'popup') {
+        await writePendingWalletOutcome({
+          kind: 'send',
+          status: 'in_progress',
+          payload: outcomePayload,
+        })
+      }
+
+      const res = await sendToBackground<
+        {
+          accountId: string
+          draft: SendDraft
+          sendTokenPriceUsd: number | null
+          network: 'testnet' | 'mainnet'
+          surface: Surface
+          outcomePayload?: Record<string, unknown>
+        },
+        SendResult & { status: 'success' }
+      >({
+        type: 'EXECUTE_SEND_SUBMIT',
+        payload: {
+          accountId: activeAccount.id,
+          draft: sendDraft,
+          sendTokenPriceUsd,
+          network: activeNetwork,
+          surface,
+          outcomePayload,
+        },
       })
+      if (!res.ok) throw new Error(friendlyError(res.error))
+
+      const result = res.data!
       setSendResult(result)
       setSendStep('success')
+      await clearPendingWalletOutcome()
       if (result.status === 'success') {
         void saveToAddressBook({
           address: sendDraft.recipientAddress,
@@ -216,35 +247,18 @@ export function SendRouteViews({
         submittedAt: new Date().toISOString(),
       })
       setSendStep('failure')
+      if (surface === 'popup') {
+        await writePendingWalletOutcome({
+          kind: 'send',
+          status: 'failure',
+          error: errorMessage,
+          payload: { draft: sendDraft, sendTokenPriceUsd },
+        }).catch(() => {})
+      }
     } finally {
       setSendProgressLabel(null)
     }
   }
-
-  useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      const pending = await consumePendingWebauthnFlowIf('sendSubmit')
-      if (cancelled || !pending || !pending.autoResume) return
-      setSendDraft(pending.draft)
-      setSendStep(pending.sendStep)
-      setSendTokenPriceUsd(pending.sendTokenPriceUsd)
-      onSetRoute('send')
-      setAutoResumeSend(true)
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [onSetRoute])
-
-  useEffect(() => {
-    if (!autoResumeSend || sendStep !== 'summary' || !activeAccount) return
-    // Wait until draft looks submit-ready (token + amount + recipient).
-    if (!sendDraft.token || !sendDraft.amount.trim() || !sendDraft.recipientAddress.trim()) return
-    setAutoResumeSend(false)
-    skipDurableHandoffRef.current = true
-    void handleSubmitSend()
-  }, [autoResumeSend, sendStep, sendDraft, activeAccount])
 
   if (loading || route !== 'send') return null
 

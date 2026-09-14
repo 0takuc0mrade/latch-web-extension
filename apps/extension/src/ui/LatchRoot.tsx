@@ -50,7 +50,6 @@ import {
   type Route,
   type Surface,
 } from './routing/routes'
-import { clearDurableHandoffFlag, readPendingWebauthnFlow } from './webauthn/durableWalletUi'
 import { useTheme } from './hooks/useTheme'
 import { useUiSurfacePreference } from './hooks/useUiSurfacePreference'
 import { useAccountsHydration } from './hooks/useAccountsHydration'
@@ -59,6 +58,7 @@ import { SwapRouteViews, type SwapOverlayFlags } from './swap/SwapRouteViews'
 import { SendRouteViews } from './send/SendRouteViews'
 import { AccountRouteViews } from './accounts/AccountRouteViews'
 import { DappRouteViews } from './dapp/DappRouteViews'
+import { isWalletResultOnlyUi, readPendingWalletOutcome } from '../lib/walletOutcome'
 
 export function LatchRoot({ surface }: { surface: Surface }) {
   useTheme()
@@ -71,6 +71,18 @@ export function LatchRoot({ surface }: { surface: Surface }) {
 
   const [loading, setLoading] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!isWalletResultOnlyUi()) return
+    void (async () => {
+      const pending = await readPendingWalletOutcome()
+      if (!pending || pending.status === 'in_progress') return
+      if (pending.kind === 'swap') setRoute('swapConfirm')
+      else if (pending.kind === 'send') setRoute('send')
+      else if (pending.kind === 'dapp') setRoute('dappApproval')
+      else if (pending.kind === 'multisigApprove') setRoute('multisigProposalDetail')
+    })()
+  }, [])
 
   const {
     setupState,
@@ -297,17 +309,6 @@ export function LatchRoot({ surface }: { surface: Surface }) {
     setMultisigJoinToken(token)
     setRoute('joinMultisig')
   })
-
-  useEffect(() => {
-    void clearDurableHandoffFlag()
-    void readPendingWebauthnFlow().then((pending) => {
-      if (!pending) return
-      setRoute(pending.route)
-      if (pending.kind === 'multisigApprove') {
-        setMultisigDetailProposalId(pending.proposalId)
-      }
-    })
-  }, [])
 
   const multisigRoutes = MULTISIG_ROUTES
   const isMultisigRoute = multisigRoutes.includes(route as Route)

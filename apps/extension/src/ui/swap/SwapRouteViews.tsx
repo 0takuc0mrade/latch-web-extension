@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
 
 import type {
   GetAssetIconDataUrlsRequest,
@@ -9,7 +9,6 @@ import type {
   GetSwapQuoteResponse,
   GetSwapTokenCatalogRequest,
   GetSwapTokenCatalogResponse,
-  RecordKnownSacProbeRequest,
   StoredAccount,
 } from '@latch/types'
 
@@ -17,9 +16,12 @@ import { SwapScreen, swapWalletLabel } from '../screens/SwapScreen'
 import { ConfirmSwapScreen } from '../screens/ConfirmSwapScreen'
 import { SwapFailureScreen } from '../screens/swap/SwapFailureScreen'
 import { SwapSuccessScreen } from '../screens/swap/SwapSuccessScreen'
-import { executeSwapWithSetupLoop } from '../lib/executeSwap'
-import { extractTransactionHash, signAndSubmitBuiltTx } from '../lib/signBuiltTx'
 import { friendlyError, sendToBackground } from '../lib/backgroundClient'
+import {
+  clearPendingWalletOutcome,
+  consumePendingWalletOutcomeIf,
+  writePendingWalletOutcome,
+} from '../../lib/walletOutcome'
 import type { SwapDraft, SwapQuoteVm, SwapTokenVm } from '../swap/swapVm'
 import {
   mergeSwapTokenCatalogs,
@@ -27,7 +29,6 @@ import {
   swapQuotePayloadToVm,
 } from '../swap/swapVm'
 import type { Route, Surface } from '../routing/routes'
-import { consumePendingWebauthnFlowIf, ensureDurableWalletUi } from '../webauthn/durableWalletUi'
 
 export type SwapOverlayFlags = {
   catalogLoading: boolean
@@ -74,8 +75,6 @@ export function SwapRouteViews({
     Record<string, number>
   >({})
   const [swapIconByCode, setSwapIconByCode] = useState<Record<string, string | null>>({})
-  const [autoResumeSwap, setAutoResumeSwap] = useState(false)
-  const skipDurableHandoffRef = useRef(false)
 
   const mapSwapTokenVm = useCallback(
     (t: {
@@ -289,31 +288,28 @@ export function SwapRouteViews({
     return refreshed
   }
 
+  useEffect(() => {
+    void (async () => {
+      const outcome = await consumePendingWalletOutcomeIf('swap')
+      if (!outcome || outcome.status === 'in_progress') return
+      const payload = outcome.payload ?? {}
+      if (payload.draft) setSwapDraft(payload.draft as SwapDraft)
+      if (payload.quote) setSwapQuote(payload.quote as SwapQuoteVm)
+      setSwapBusy(false)
+      if (outcome.status === 'success') {
+        setSwapStep('success')
+        setSwapFailureDetail(null)
+        void onLoadPortfolio()
+      } else {
+        setSwapStep('failure')
+        setSwapFailureDetail(outcome.error ?? 'Swap failed.')
+      }
+      onSetRoute('swapConfirm')
+    })()
+  }, [onLoadPortfolio, onSetRoute])
+
   async function handleConfirmSwap() {
     if (!activeAccount?.id || !swapQuote || !swapDraft) return
-
-    if (!skipDurableHandoffRef.current) {
-      try {
-        const handoff = await ensureDurableWalletUi({
-          surface,
-          pending: {
-            version: 1,
-            kind: 'swapConfirm',
-            route: 'swapConfirm',
-            autoResume: true,
-            createdAt: Date.now(),
-            draft: swapDraft,
-            quote: swapQuote,
-          },
-        })
-        if (handoff.relocated) return
-      } catch (e) {
-        setSwapFailureDetail(e instanceof Error ? e.message : String(e))
-        setSwapStep('failure')
-        return
-      }
-    }
-    skipDurableHandoffRef.current = false
 
     setSwapBusy(true)
     setSwapFailureDetail(null)
@@ -324,11 +320,41 @@ export function SwapRouteViews({
           ? await refreshSwapQuoteForConfirm()
           : swapQuote
 
-      const prepared = await executeSwapWithSetupLoop({
-        quoteForTx,
-        activeAccount,
-        surface,
+      const outcomePayload = { draft: swapDraft, quote: quoteForTx }
+      if (surface === 'popup') {
+        await writePendingWalletOutcome({
+          kind: 'swap',
+          status: 'in_progress',
+          payload: outcomePayload,
+        })
+      }
+
+      const res = await sendToBackground<
+        {
+          accountId: string
+          quote: typeof quoteForTx.quotePayload
+          surface: Surface
+          outcomePayload?: Record<string, unknown>
+        },
+        {
+          prepared: {
+            estimatedFeeXlm?: string
+            feeLabel?: string
+          }
+          submit: { transactionHash?: string; hash?: string }
+        }
+      >({
+        type: 'EXECUTE_SWAP_CONFIRM',
+        payload: {
+          accountId: activeAccount.id,
+          quote: quoteForTx.quotePayload,
+          surface,
+          outcomePayload,
+        },
       })
+      if (!res.ok) throw new Error(friendlyError(res.error))
+
+      const prepared = res.data!.prepared
       if (prepared.estimatedFeeXlm || prepared.feeLabel) {
         setSwapQuote((prev) =>
           prev
@@ -342,59 +368,33 @@ export function SwapRouteViews({
         )
       }
 
-      const submitData = await signAndSubmitBuiltTx({
-        build: prepared,
-        activeAccount,
-        surface,
-      })
-      const txHash = extractTransactionHash(submitData)
       setSwapStep('success')
-      const assetOut = quoteForTx.quotePayload.assetOut
-      void sendToBackground<RecordKnownSacProbeRequest, undefined>({
-        type: 'RECORD_KNOWN_SAC_PROBE',
-        payload: {
-          accountId: activeAccount.id,
-          probe: {
-            code: assetOut.symbol,
-            issuer: assetOut.issuer,
-            sacContractId: assetOut.contractId,
-          },
-        },
-      })
+      await clearPendingWalletOutcome()
       void onLoadPortfolio()
+      const submit = res.data!.submit
+      const txHash =
+        typeof submit.transactionHash === 'string'
+          ? submit.transactionHash
+          : typeof submit.hash === 'string'
+            ? submit.hash
+            : undefined
       if (txHash) console.info('[latch:swap] submitted', txHash)
     } catch (e) {
       console.error('[latch:swap]', e)
       setSwapFailureDetail(e instanceof Error ? e.message : String(e))
       setSwapStep('failure')
+      if (surface === 'popup') {
+        await writePendingWalletOutcome({
+          kind: 'swap',
+          status: 'failure',
+          error: e instanceof Error ? e.message : String(e),
+          payload: { draft: swapDraft, quote: swapQuote },
+        }).catch(() => {})
+      }
     } finally {
       setSwapBusy(false)
     }
   }
-
-  useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      const pending = await consumePendingWebauthnFlowIf('swapConfirm')
-      if (cancelled || !pending || !pending.autoResume) return
-      setSwapDraft(pending.draft)
-      setSwapQuote(pending.quote)
-      setSwapStep('confirm')
-      onSetRoute('swapConfirm')
-      setAutoResumeSwap(true)
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [onSetRoute])
-
-  useEffect(() => {
-    if (!autoResumeSwap || !swapDraft || !swapQuote || !activeAccount?.id) return
-    setAutoResumeSwap(false)
-    skipDurableHandoffRef.current = true
-    void handleConfirmSwap()
-    // Intentionally only when auto-resume flag flips on with restored state.
-  }, [autoResumeSwap, swapDraft, swapQuote, activeAccount?.id])
 
   if (loading) return null
   if (route !== 'swap' && route !== 'swapConfirm') return null

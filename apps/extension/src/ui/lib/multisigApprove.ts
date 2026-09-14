@@ -1,34 +1,16 @@
 import type {
   MultisigAccountMember,
   MultisigApproveDelegatedFinishRequest,
-  MultisigApproveWebauthnRequest,
   MultisigProposalDetail,
   SignDelegatedGAuthEntryRequest,
   SignDelegatedGAuthEntryResponse,
   StoredAccount,
 } from '@latch/types'
 
-import type { startAuthentication } from '@simplewebauthn/browser'
-
 import { fetchActiveNetwork, networkPassphraseFor } from './activeNetwork'
 import { friendlyError, sendToBackground } from './backgroundClient'
-import {
-  assertPasskeyAssertionMatchesAuthDigest,
-  buildPasskeySigDataXdrFromAssertion,
-  passkeyAuthenticationOptionsForAuthDigest,
-} from '../webauthn/passkey'
-import { runWebauthnCredential } from '../webauthn/runWebauthnCredential'
 
 export type MultisigApprovalSignerKind = 'passkey' | 'delegated'
-
-async function runPasskeyAuth(
-  surface: 'popup' | 'sidepanel',
-  optionsJSON: unknown
-): Promise<Awaited<ReturnType<typeof startAuthentication>>> {
-  return (await runWebauthnCredential(surface, 'authentication', optionsJSON)) as Awaited<
-    ReturnType<typeof startAuthentication>
-  >
-}
 
 export function findProposalMember(
   proposal: MultisigProposalDetail,
@@ -239,24 +221,48 @@ export async function approveMultisigProposalWithPasskey(args: {
     throw new Error('No passkey is available to approve this proposal.')
   }
 
-  const optionsJSON = passkeyAuthenticationOptionsForAuthDigest({
+  const assertion = await runPasskeyBridgeViaBackground({
+    proposalId: proposal.id,
+    memberId,
     authDigestHex,
-    credentialId,
+    accountId: activeAccount.id,
+    memberCredentialId: member?.credentialId,
+    surface,
   })
+  return assertion
+}
 
-  const assertion = await runPasskeyAuth(surface, optionsJSON)
-  assertPasskeyAssertionMatchesAuthDigest(assertion, authDigestHex)
-  const sigDataXdrHex = buildPasskeySigDataXdrFromAssertion(assertion)
-
-  const res = await sendToBackground<MultisigApproveWebauthnRequest, MultisigProposalDetail>({
-    type: 'MULTISIG_APPROVE_WEBAUTHN',
+async function runPasskeyBridgeViaBackground(args: {
+  proposalId: string
+  memberId: string
+  authDigestHex: string
+  accountId: string
+  memberCredentialId?: string
+  surface: 'popup' | 'sidepanel'
+}): Promise<MultisigProposalDetail> {
+  const res = await sendToBackground<
+    {
+      accountId: string
+      proposalId: string
+      memberId: string
+      authDigestHex: string
+      memberCredentialId?: string
+      surface: 'popup' | 'sidepanel'
+      outcomePayload?: Record<string, unknown>
+    },
+    MultisigProposalDetail
+  >({
+    type: 'EXECUTE_MULTISIG_PASSKEY_APPROVE',
     payload: {
-      proposalId: proposal.id,
-      memberId,
-      sigDataXdrHex,
+      accountId: args.accountId,
+      proposalId: args.proposalId,
+      memberId: args.memberId,
+      authDigestHex: args.authDigestHex,
+      memberCredentialId: args.memberCredentialId,
+      surface: args.surface,
+      outcomePayload: { proposalId: args.proposalId },
     },
   })
-
   if (!res.ok) throw new Error(friendlyError(res.error))
   return res.data!
 }

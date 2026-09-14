@@ -15,6 +15,7 @@ import './actionBehavior'
 import type { BackgroundMessage, BackgroundResponse, CancelRequest } from '@latch/types'
 
 import { tryHandleAccountsMessage } from './accounts/handlers'
+import { tryHandleConfirmMessage } from './confirm/handlers'
 import { initDappApprovalListeners } from './dapp/approvalSession'
 import { tryHandleDappMessage } from './dapp/handlers'
 import { tryHandleDepositMessage } from './deposit/handlers'
@@ -54,6 +55,9 @@ chrome.runtime.onMessage.addListener((rawMessage: BackgroundMessage, _sender, se
       return
     }
     if (await tryHandleAccountsMessage(message, sendResponse, ok)) {
+      return
+    }
+    if (await tryHandleConfirmMessage(message, sendResponse, ok)) {
       return
     }
     if (await tryHandleTxMessage(message, sendResponse, ok)) {

@@ -1,76 +1,70 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createChromeMock } from '../../test/chromeMock'
-import {
-  openPasskeyBridgeAndWait,
-  passkeyBridgeResultStorageKey,
-  publishPasskeyBridgeResult,
-} from './passkeyBridge'
 
-describe('passkeyBridge', () => {
+const sendToBackground = vi.fn()
+
+vi.mock('../lib/backgroundClient', () => ({
+  sendToBackground: (...args: unknown[]) => sendToBackground(...args),
+  friendlyError: (e?: { message?: string }) => e?.message ?? 'error',
+}))
+
+describe('passkeyBridge UI client', () => {
   beforeEach(() => {
     const mock = createChromeMock()
     globalThis.chrome = mock as unknown as typeof chrome
-    vi.stubGlobal('window', {
-      setTimeout: globalThis.setTimeout.bind(globalThis),
-      clearTimeout: globalThis.clearTimeout.bind(globalThis),
-    })
-    vi.spyOn(crypto, 'randomUUID').mockReturnValue(
-      '00000000-0000-4000-8000-000000000001' as `${string}-${string}-${string}-${string}-${string}`
-    )
+    sendToBackground.mockReset()
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
-    vi.unstubAllGlobals()
   })
 
-  it('resolves when result is published via storage fallback', async () => {
-    const ticket = '00000000-0000-4000-8000-000000000001'
-    const waiter = openPasskeyBridgeAndWait({
-      mode: 'authentication',
-      optionsJSON: { challenge: 'abc', rpId: 'example.com' },
-      timeoutMs: 5_000,
+  it('openPasskeyBridgeAndWait delegates to RUN_PASSKEY_BRIDGE', async () => {
+    sendToBackground.mockResolvedValue({ ok: true, data: { id: 'cred' } })
+    const { openPasskeyBridgeAndWait } = await import('./passkeyBridge')
+    await expect(
+      openPasskeyBridgeAndWait({
+        mode: 'authentication',
+        optionsJSON: { challenge: 'abc' },
+      })
+    ).resolves.toEqual({ id: 'cred' })
+    expect(sendToBackground).toHaveBeenCalledWith({
+      type: 'RUN_PASSKEY_BRIDGE',
+      payload: {
+        mode: 'authentication',
+        optionsJSON: { challenge: 'abc' },
+      },
     })
+  })
 
-    // Allow request write + window create callbacks to run.
-    await vi.waitFor(async () => {
-      const bag = await chrome.storage.session.get(`latchPasskeyBridgeReq:${ticket}`)
-      // Request key is removed only after bridge reads it; it should exist briefly,
-      // or window create already ran. Either way, publish should settle the waiter.
-      void bag
-      return true
+  it('openPasskeyBridgeAndWait throws on background error', async () => {
+    sendToBackground.mockResolvedValue({
+      ok: false,
+      error: { message: 'Passkey was cancelled or failed.' },
     })
+    const { openPasskeyBridgeAndWait } = await import('./passkeyBridge')
+    await expect(
+      openPasskeyBridgeAndWait({
+        mode: 'registration',
+        optionsJSON: { challenge: 'xyz' },
+      })
+    ).rejects.toThrow('Passkey was cancelled or failed.')
+  })
 
+  it('publishPasskeyBridgeResult writes session storage', async () => {
+    const { publishPasskeyBridgeResult, passkeyBridgeResultStorageKey } =
+      await import('./passkeyBridge')
+    const ticket = 'ticket-1'
     await publishPasskeyBridgeResult({
       ticket,
       ok: true,
       response: { id: 'cred' },
     })
-
-    await expect(waiter).resolves.toEqual({ id: 'cred' })
     const bag = await chrome.storage.session.get(passkeyBridgeResultStorageKey(ticket))
-    expect(bag[passkeyBridgeResultStorageKey(ticket)]).toBeUndefined()
-  })
-
-  it('rejects when published failure result arrives via storage', async () => {
-    const ticket = '00000000-0000-4000-8000-000000000001'
-    const waiter = openPasskeyBridgeAndWait({
-      mode: 'registration',
-      optionsJSON: { challenge: 'xyz' },
-      timeoutMs: 5_000,
+    expect(bag[passkeyBridgeResultStorageKey(ticket)]).toMatchObject({
+      ok: true,
+      response: { id: 'cred' },
     })
-
-    await Promise.resolve()
-    await Promise.resolve()
-    await Promise.resolve()
-
-    await publishPasskeyBridgeResult({
-      ticket,
-      ok: false,
-      error: 'User cancelled.',
-    })
-
-    await expect(waiter).rejects.toThrow('User cancelled.')
   })
 })

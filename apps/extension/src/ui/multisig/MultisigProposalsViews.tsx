@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 
 import type { MultisigProposal, MultisigProposalDetail, StoredAccount } from '@latch/types'
 
@@ -9,11 +9,15 @@ import {
   peekMultisigApprovalSigner,
   proposalNeedsMyApproval,
 } from '../lib/multisigApprove'
+import {
+  clearPendingWalletOutcome,
+  consumePendingWalletOutcomeIf,
+  writePendingWalletOutcome,
+} from '../../lib/walletOutcome'
 import { apiGetProposal } from '../lib/multisigFlow'
 import { MultisigProposalDetailScreen } from '../screens/multisig/MultisigProposalDetailScreen'
 import { MultisigProposalsScreen } from '../screens/multisig/MultisigProposalsScreen'
 import { LatchLoadingOverlay } from '../components/LatchLoadingOverlay'
-import { consumePendingWebauthnFlowIf, ensureDurableWalletUi } from '../webauthn/durableWalletUi'
 
 export function MultisigProposalsViews({
   route,
@@ -37,8 +41,6 @@ export function MultisigProposalsViews({
   const [activeProposal, setActiveProposal] = useState<MultisigProposalDetail | null>(null)
   const [proposalBusy, setProposalBusy] = useState(false)
   const [proposalActionError, setProposalActionError] = useState<string | null>(null)
-  const [autoResumeApprove, setAutoResumeApprove] = useState(false)
-  const skipDurableHandoffRef = useRef(false)
 
   const loadProposals = useCallback(async () => {
     if (!activeAccount?.smartAccountAddress || activeAccount.mode !== 'multisig') return
@@ -85,48 +87,35 @@ export function MultisigProposalsViews({
   }, [route, externalProposalId, loadProposalDetail])
 
   useEffect(() => {
-    let cancelled = false
     void (async () => {
-      const pending = await consumePendingWebauthnFlowIf('multisigApprove')
-      if (cancelled || !pending?.autoResume) return
-      setActiveProposalId(pending.proposalId)
-      onSetRoute('multisigProposalDetail')
-      await loadProposalDetail(pending.proposalId)
-      if (!cancelled) setAutoResumeApprove(true)
+      const outcome = await consumePendingWalletOutcomeIf('multisigApprove')
+      if (!outcome || outcome.status === 'in_progress') return
+      const proposalId = outcome.payload?.proposalId
+      if (typeof proposalId === 'string' && proposalId) {
+        setActiveProposalId(proposalId)
+        onSetRoute('multisigProposalDetail')
+        void loadProposalDetail(proposalId)
+      }
+      setProposalBusy(false)
+      if (outcome.status === 'failure') {
+        setProposalActionError(formatMultisigProposalError(outcome.error ?? 'Approve failed.'))
+      }
     })()
-    return () => {
-      cancelled = true
-    }
-  }, [onSetRoute, loadProposalDetail])
+  }, [loadProposalDetail, onSetRoute])
 
   async function runApprove() {
     if (!activeProposal || !activeAccount) return
 
-    if (!skipDurableHandoffRef.current) {
-      try {
-        const handoff = await ensureDurableWalletUi({
-          surface,
-          pending: {
-            version: 1,
-            kind: 'multisigApprove',
-            route: 'multisigProposalDetail',
-            autoResume: true,
-            createdAt: Date.now(),
-            proposalId: activeProposal.id,
-          },
-        })
-        if (handoff.relocated) return
-      } catch (e) {
-        const raw = e instanceof Error ? e.message : String(e)
-        setProposalActionError(formatMultisigProposalError(raw))
-        return
-      }
-    }
-    skipDurableHandoffRef.current = false
-
     setProposalBusy(true)
     setProposalActionError(null)
     try {
+      if (surface === 'popup') {
+        await writePendingWalletOutcome({
+          kind: 'multisigApprove',
+          status: 'in_progress',
+          payload: { proposalId: activeProposal.id },
+        })
+      }
       const updated = await approveMultisigProposal({
         proposal: activeProposal,
         activeAccount,
@@ -134,21 +123,23 @@ export function MultisigProposalsViews({
         surface,
       })
       setActiveProposal(updated)
+      await clearPendingWalletOutcome()
     } catch (e) {
       const raw = e instanceof Error ? e.message : String(e)
       setProposalActionError(formatMultisigProposalError(raw))
+      if (surface === 'popup') {
+        await writePendingWalletOutcome({
+          kind: 'multisigApprove',
+          status: 'failure',
+          error: raw,
+          payload: { proposalId: activeProposal.id },
+        }).catch(() => {})
+      }
     } finally {
       setProposalBusy(false)
       void loadProposals()
     }
   }
-
-  useEffect(() => {
-    if (!autoResumeApprove || !activeProposal || !activeAccount || proposalBusy) return
-    setAutoResumeApprove(false)
-    skipDurableHandoffRef.current = true
-    void runApprove()
-  }, [autoResumeApprove, activeProposal, activeAccount])
 
   const pendingApprovalCount = useMemo(() => {
     if (!activeAccount?.multisigMemberId) return 0
