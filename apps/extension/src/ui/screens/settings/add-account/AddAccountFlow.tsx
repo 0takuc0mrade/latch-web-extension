@@ -22,7 +22,6 @@ import {
   prepareRegistrationOptionsForCreate,
 } from '../../../webauthn/passkey'
 import { runWebauthnCredential } from '../../../webauthn/runWebauthnCredential'
-import { ensureDurableWalletUi } from '../../../webauthn/durableWalletUi'
 import { AddAccountChooseMethodScreen, type AddAccountMethod } from './AddAccountChooseMethodScreen'
 import { AddAccountCreatePasskeyScreen } from './AddAccountCreatePasskeyScreen'
 import { AddAccountCreateScreen } from './AddAccountCreateScreen'
@@ -179,19 +178,6 @@ export function AddAccountFlow({
         }
 
         const optionsJSON = pre.optionsJSON
-        const handoff = await ensureDurableWalletUi({
-          surface,
-          pending: {
-            version: 1,
-            kind: 'passkeyAuthentication',
-            route: 'addAccountPasskey',
-            autoResume: true,
-            createdAt: Date.now(),
-            optionsJSON,
-          },
-        })
-        if (handoff.relocated) return
-
         const assertion = await runPasskeyAuthentication(optionsJSON)
         pendingPasskeyRef.current = { kind: 'authentication', optionsJSON, assertion }
         pendingRecoveryRef.current = null
@@ -221,20 +207,6 @@ export function AddAccountFlow({
         }
 
         const optionsJSON = pre.optionsJSON
-        const handoff = await ensureDurableWalletUi({
-          surface,
-          pending: {
-            version: 1,
-            kind: 'passkeyRegistration',
-            route: 'createPasskey',
-            autoResume: true,
-            createdAt: Date.now(),
-            optionsJSON,
-            displayName: pre.displayName,
-          },
-        })
-        if (handoff.relocated) return
-
         const registration = await runPasskeyRegistration(optionsJSON)
         assertRegistrationCeremonyForFinish(registration)
 
