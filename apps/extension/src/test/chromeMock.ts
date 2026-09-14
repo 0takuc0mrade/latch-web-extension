@@ -1,50 +1,119 @@
+type StorageChangeListener = (
+  changes: { [key: string]: { oldValue?: any; newValue?: any } },
+  areaName: string
+) => void
+
 type StorageArea = {
-  get: (keys?: string[] | Record<string, any>) => Promise<Record<string, any>>
-  set: (items: Record<string, any>) => Promise<void>
-  remove: (keys: string | string[]) => Promise<void>
+  get: (
+    keys?: string | string[] | Record<string, any>,
+    callback?: (items: Record<string, any>) => void
+  ) => Promise<Record<string, any>> | void
+  set: (items: Record<string, any>, callback?: () => void) => Promise<void> | void
+  remove: (keys: string | string[], callback?: () => void) => Promise<void> | void
 }
 
-export function createChromeMock() {
-  const store = new Map<string, any>()
-  const onMessageListeners: Array<
-    (message: any, sender: any, sendResponse: (res: any) => void) => void
-  > = []
+function createStorageArea(
+  store: Map<string, any>,
+  areaName: string,
+  onChangedListeners: StorageChangeListener[]
+): StorageArea {
+  return {
+    get(keys, callback) {
+      const run = async () => {
+        if (keys == null) {
+          return Object.fromEntries(store.entries())
+        }
 
-  const local: StorageArea = {
-    async get(keys) {
-      if (!keys) {
-        return Object.fromEntries(store.entries())
-      }
+        if (typeof keys === 'string') {
+          return { [keys]: store.get(keys) }
+        }
 
-      if (Array.isArray(keys)) {
+        if (Array.isArray(keys)) {
+          const out: Record<string, any> = {}
+          for (const k of keys) out[k] = store.get(k)
+          return out
+        }
+
         const out: Record<string, any> = {}
-        for (const k of keys) out[k] = store.get(k)
+        for (const [k, defaultValue] of Object.entries(keys)) {
+          out[k] = store.has(k) ? store.get(k) : defaultValue
+        }
         return out
       }
 
-      const out: Record<string, any> = {}
-      for (const [k, defaultValue] of Object.entries(keys)) {
-        out[k] = store.has(k) ? store.get(k) : defaultValue
+      if (callback) {
+        void run().then(callback)
+        return
       }
-      return out
+      return run()
     },
-    async set(items) {
-      for (const [k, v] of Object.entries(items)) store.set(k, v)
+    set(items, callback) {
+      const run = async () => {
+        const changes: { [key: string]: { oldValue?: any; newValue?: any } } = {}
+        for (const [k, v] of Object.entries(items)) {
+          changes[k] = { oldValue: store.get(k), newValue: v }
+          store.set(k, v)
+        }
+        for (const listener of onChangedListeners) listener(changes, areaName)
+      }
+      if (callback) {
+        void run().then(() => callback())
+        return
+      }
+      return run()
     },
-    async remove(keys) {
-      const list = Array.isArray(keys) ? keys : [keys]
-      for (const k of list) store.delete(k)
+    remove(keys, callback) {
+      const run = async () => {
+        const list = Array.isArray(keys) ? keys : [keys]
+        const changes: { [key: string]: { oldValue?: any; newValue?: any } } = {}
+        for (const k of list) {
+          if (store.has(k)) {
+            changes[k] = { oldValue: store.get(k), newValue: undefined }
+            store.delete(k)
+          }
+        }
+        if (Object.keys(changes).length > 0) {
+          for (const listener of onChangedListeners) listener(changes, areaName)
+        }
+      }
+      if (callback) {
+        void run().then(() => callback())
+        return
+      }
+      return run()
     },
   }
+}
+
+export function createChromeMock() {
+  const localStore = new Map<string, any>()
+  const sessionStore = new Map<string, any>()
+  const onMessageListeners: Array<
+    (message: any, sender: any, sendResponse: (res: any) => void) => void
+  > = []
+  const onChangedListeners: StorageChangeListener[] = []
+  let lastError: { message: string } | undefined
+  let currentWindow: { id?: number; type?: string } = { id: 1, type: 'normal' }
+
+  const local = createStorageArea(localStore, 'local', onChangedListeners)
+  const session = createStorageArea(sessionStore, 'session', onChangedListeners)
 
   return {
     storage: {
       local,
+      session,
       onChanged: {
-        addListener() {},
+        addListener(cb: StorageChangeListener) {
+          onChangedListeners.push(cb)
+        },
+        removeListener(cb: StorageChangeListener) {
+          const idx = onChangedListeners.indexOf(cb)
+          if (idx >= 0) onChangedListeners.splice(idx, 1)
+        },
       },
     },
     runtime: {
+      lastError: undefined as { message: string } | undefined,
       getURL(path: string) {
         return `chrome-extension://test/${path}`
       },
@@ -56,6 +125,10 @@ export function createChromeMock() {
       onMessage: {
         addListener(cb: any) {
           onMessageListeners.push(cb)
+        },
+        removeListener(cb: any) {
+          const idx = onMessageListeners.indexOf(cb)
+          if (idx >= 0) onMessageListeners.splice(idx, 1)
         },
       },
       onInstalled: {
@@ -83,12 +156,23 @@ export function createChromeMock() {
     },
     windows: {
       async getCurrent() {
-        return { id: 1 }
+        return currentWindow
       },
       async getLastFocused() {
-        return { id: 1 }
+        return currentWindow
       },
       async update() {},
+      create(
+        _opts: Record<string, unknown>,
+        callback?: (win?: { id?: number; type?: string }) => void
+      ) {
+        const win = { id: 99, type: 'popup' as const }
+        currentWindow = win
+        const runtimeApi = (globalThis as any).chrome?.runtime
+        if (runtimeApi) runtimeApi.lastError = lastError
+        if (callback) callback(lastError ? undefined : win)
+        return Promise.resolve(lastError ? undefined : win)
+      },
     },
     sidePanel: {
       async open() {},
@@ -96,5 +180,13 @@ export function createChromeMock() {
       async setOptions() {},
       async setPanelBehavior() {},
     },
+    /** Test helpers */
+    __setCurrentWindow(win: { id?: number; type?: string }) {
+      currentWindow = win
+    },
+    __setLastError(err: { message: string } | undefined) {
+      lastError = err
+    },
+    __sessionStore: sessionStore,
   }
 }

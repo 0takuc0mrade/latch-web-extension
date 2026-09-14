@@ -1,4 +1,4 @@
-import { startAuthentication } from '@simplewebauthn/browser'
+import type { startAuthentication } from '@simplewebauthn/browser'
 
 import { formatFundError } from '../fund/fundErrors'
 import { friendlyError, sendToBackground } from './backgroundClient'
@@ -7,7 +7,7 @@ import {
   passkeyAuthenticationOptionsForV1Challenge,
   prepareAuthenticationOptionsForGet,
 } from '../webauthn/passkey'
-import { openPasskeyBridgeAndWait } from '../webauthn/passkeyBridge'
+import { runWebauthnCredential } from '../webauthn/runWebauthnCredential'
 
 async function tryEnsureV1Auth(linkedAccountId: string): Promise<boolean> {
   const res = await sendToBackground<{ linkedAccountId: string }, { ok: true }>({
@@ -43,15 +43,11 @@ async function signInWithPasskey(args: {
     })
   )
 
-  const assertion =
-    args.surface === 'sidepanel'
-      ? ((await openPasskeyBridgeAndWait({
-          mode: 'authentication',
-          optionsJSON: prepared,
-        })) as Awaited<ReturnType<typeof startAuthentication>>)
-      : await startAuthentication({
-          optionsJSON: prepared,
-        } as Parameters<typeof startAuthentication>[0])
+  const assertion = (await runWebauthnCredential(
+    args.surface,
+    'authentication',
+    prepared
+  )) as Awaited<ReturnType<typeof startAuthentication>>
 
   assertPasskeyAssertionMatchesV1Challenge(assertion, nonce)
 

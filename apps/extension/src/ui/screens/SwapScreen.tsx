@@ -260,7 +260,7 @@ export function SwapScreen({
                   value={payAmount}
                   onChange={(e) => setPayAmount(e.target.value)}
                   placeholder="0.00"
-                  className="w-full min-w-[72px] bg-transparent text-right text-xl font-semibold tracking-[-0.4px] text-white outline-none placeholder:text-white"
+                  className="box-border w-full min-w-0 bg-transparent text-right text-xl font-semibold tracking-[-0.4px] text-white outline-none placeholder:text-white"
                 />
               }
             />

@@ -10,17 +10,17 @@ export function SwapAmountColumn({
   mutedTop?: boolean
 }) {
   return (
-    <div className="flex min-w-0 flex-col items-end justify-center gap-2 text-right">
+    <div className="flex w-full min-w-0 flex-col items-end justify-center gap-2 text-right">
       <div
         className={[
-          'text-xl font-semibold tracking-[-0.4px]',
+          'w-full min-w-0 text-xl font-semibold tracking-[-0.4px]',
           mutedTop ? 'text-muted' : 'text-white',
         ].join(' ')}
       >
         {top}
       </div>
       {bottom != null ? (
-        <div className="text-sm tracking-[-0.28px] text-muted">{bottom}</div>
+        <div className="w-full min-w-0 text-sm tracking-[-0.28px] text-muted">{bottom}</div>
       ) : null}
     </div>
   )

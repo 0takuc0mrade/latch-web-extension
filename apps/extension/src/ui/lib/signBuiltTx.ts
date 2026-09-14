@@ -8,7 +8,7 @@ import type {
   SubmitWebauthnTxRequest,
 } from '@latch/types'
 
-import { startAuthentication } from '@simplewebauthn/browser'
+import type { startAuthentication } from '@simplewebauthn/browser'
 
 import { resolveDelegatedAuthEntryForSigner } from '../../lib/delegatedAuthSubmit'
 import {
@@ -16,9 +16,8 @@ import {
   buildPasskeySigDataXdrFromAssertion,
   enrichWebauthnRpIdHashErrorMessage,
   passkeyAuthenticationOptionsForAuthDigest,
-  prepareAuthenticationOptionsForGet,
 } from '../webauthn/passkey'
-import { openPasskeyBridgeAndWait } from '../webauthn/passkeyBridge'
+import { runWebauthnCredential } from '../webauthn/runWebauthnCredential'
 import {
   contextRuleIdForSubmit,
   delegatedSubmitFields,
@@ -49,20 +48,9 @@ async function runPasskeyAuth(
   surface: 'popup' | 'sidepanel',
   optionsJSON: unknown
 ): Promise<Awaited<ReturnType<typeof startAuthentication>>> {
-  const prepared = prepareAuthenticationOptionsForGet(optionsJSON) as {
-    allowCredentials?: Array<{ id?: string; transports?: string[] }>
-    hints?: string[]
-    rpId?: string
-  }
-  if (surface === 'sidepanel') {
-    return (await openPasskeyBridgeAndWait({
-      mode: 'authentication',
-      optionsJSON,
-    })) as Awaited<ReturnType<typeof startAuthentication>>
-  }
-  return await startAuthentication({
-    optionsJSON: prepared,
-  } as Parameters<typeof startAuthentication>[0])
+  return (await runWebauthnCredential(surface, 'authentication', optionsJSON)) as Awaited<
+    ReturnType<typeof startAuthentication>
+  >
 }
 
 export async function signAndSubmitBuiltTx(args: {

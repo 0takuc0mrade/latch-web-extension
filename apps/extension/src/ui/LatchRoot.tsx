@@ -50,6 +50,7 @@ import {
   type Route,
   type Surface,
 } from './routing/routes'
+import { clearDurableHandoffFlag, readPendingWebauthnFlow } from './webauthn/durableWalletUi'
 import { useTheme } from './hooks/useTheme'
 import { useUiSurfacePreference } from './hooks/useUiSurfacePreference'
 import { useAccountsHydration } from './hooks/useAccountsHydration'
@@ -266,7 +267,9 @@ export function LatchRoot({ surface }: { surface: Surface }) {
   }
 
   const containerClass =
-    surface === 'sidepanel' ? 'h-screen w-full min-w-[320px]' : 'h-[600px] w-[360px]'
+    surface === 'sidepanel'
+      ? 'h-screen w-full min-w-[320px] overflow-x-hidden'
+      : 'h-[600px] w-[360px] overflow-hidden'
   const flowHeightClass = surface === 'sidepanel' ? 'flex-1 min-h-0' : 'h-[520px]'
   const showTopHeader = page === 'main' && !needsMnemonicUnlock && route === 'migration'
   // Home shell waits on portfolio only. History (Horizon + SAC) can be slow; gating
@@ -294,6 +297,17 @@ export function LatchRoot({ surface }: { surface: Surface }) {
     setMultisigJoinToken(token)
     setRoute('joinMultisig')
   })
+
+  useEffect(() => {
+    void clearDurableHandoffFlag()
+    void readPendingWebauthnFlow().then((pending) => {
+      if (!pending) return
+      setRoute(pending.route)
+      if (pending.kind === 'multisigApprove') {
+        setMultisigDetailProposalId(pending.proposalId)
+      }
+    })
+  }, [])
 
   const multisigRoutes = MULTISIG_ROUTES
   const isMultisigRoute = multisigRoutes.includes(route as Route)

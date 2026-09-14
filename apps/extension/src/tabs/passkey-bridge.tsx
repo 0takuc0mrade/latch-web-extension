@@ -9,8 +9,8 @@ import {
   prepareRegistrationOptionsForCreate,
 } from '../ui/webauthn/passkey'
 import {
-  LATCH_PASSKEY_BRIDGE_RESULT,
   passkeyBridgeStorageKey,
+  publishPasskeyBridgeResult,
   type PasskeyBridgeStoredPayload,
 } from '../ui/webauthn/passkeyBridge'
 
@@ -64,21 +64,11 @@ export default function PasskeyBridgeTab() {
             optionsJSON: prepareAuthenticationOptionsForGet(payload.optionsJSON),
           } as Parameters<typeof startAuthentication>[0])
         }
-        await chrome.runtime.sendMessage({
-          type: LATCH_PASSKEY_BRIDGE_RESULT,
-          ticket,
-          ok: true,
-          response,
-        })
+        await publishPasskeyBridgeResult({ ticket, ok: true, response })
         window.close()
       } catch (e) {
         const msg = formatWebauthnBrowserError(e)
-        await chrome.runtime.sendMessage({
-          type: LATCH_PASSKEY_BRIDGE_RESULT,
-          ticket,
-          ok: false,
-          error: msg,
-        })
+        await publishPasskeyBridgeResult({ ticket, ok: false, error: msg })
         window.close()
       }
     })()

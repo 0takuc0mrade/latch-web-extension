@@ -1,21 +1,42 @@
 /**
  * Chrome often does not complete WebAuthn (navigator.credentials) in the extension side panel
  * (the promise can hang with no system UI). We run the ceremony in a small extension popup window
- * instead; popup surface keeps in-page WebAuthn.
+ * instead; durable popup surface keeps in-page WebAuthn.
  */
 
 export const LATCH_PASSKEY_BRIDGE_RESULT = 'LATCH_PASSKEY_BRIDGE_RESULT' as const
 
 const REQ_PREFIX = 'latchPasskeyBridgeReq:'
+const RESULT_PREFIX = 'latchPasskeyBridgeResult:'
 
 export function passkeyBridgeStorageKey(ticket: string): string {
   return `${REQ_PREFIX}${ticket}`
+}
+
+export function passkeyBridgeResultStorageKey(ticket: string): string {
+  return `${RESULT_PREFIX}${ticket}`
 }
 
 export type PasskeyBridgeStoredPayload = {
   mode: 'registration' | 'authentication'
   optionsJSON: unknown
   createdAt: number
+}
+
+export type PasskeyBridgeStoredResult = {
+  ok: boolean
+  response?: unknown
+  error?: string
+  createdAt: number
+}
+
+function settleFromResult(
+  result: PasskeyBridgeStoredResult,
+  resolve: (value: unknown) => void,
+  reject: (reason?: unknown) => void
+) {
+  if (result.ok && result.response !== undefined) resolve(result.response)
+  else reject(new Error(result.error ?? 'Passkey was cancelled or failed.'))
 }
 
 export async function openPasskeyBridgeAndWait(args: {
@@ -29,6 +50,7 @@ export async function openPasskeyBridgeAndWait(args: {
 
   const ticket = crypto.randomUUID()
   const key = passkeyBridgeStorageKey(ticket)
+  const resultKey = passkeyBridgeResultStorageKey(ticket)
 
   try {
     JSON.stringify(args.optionsJSON)
@@ -46,10 +68,24 @@ export async function openPasskeyBridgeAndWait(args: {
   const timeoutMs = args.timeoutMs ?? 120_000
 
   return await new Promise((resolve, reject) => {
-    const to = window.setTimeout(() => {
+    let settled = false
+
+    const cleanup = () => {
       chrome.runtime.onMessage.removeListener(onMsg)
-      void chrome.storage.session.remove(key)
-      reject(new Error('Passkey prompt timed out.'))
+      chrome.storage.onChanged.removeListener(onStorage)
+      void chrome.storage.session.remove([key, resultKey]).catch(() => {})
+    }
+
+    const finish = (fn: () => void) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(to)
+      cleanup()
+      fn()
+    }
+
+    const to = window.setTimeout(() => {
+      finish(() => reject(new Error('Passkey prompt timed out.')))
     }, timeoutMs)
 
     const onMsg = (message: unknown) => {
@@ -63,23 +99,37 @@ export async function openPasskeyBridgeAndWait(args: {
       if (m?.type !== LATCH_PASSKEY_BRIDGE_RESULT || m.ticket !== ticket) {
         return
       }
-      window.clearTimeout(to)
-      chrome.runtime.onMessage.removeListener(onMsg)
-      void chrome.storage.session.remove(key).catch(() => {})
-      if (m.ok && m.response !== undefined) resolve(m.response)
-      else reject(new Error(m.error ?? 'Passkey was cancelled or failed.'))
+      finish(() => {
+        if (m.ok && m.response !== undefined) resolve(m.response)
+        else reject(new Error(m.error ?? 'Passkey was cancelled or failed.'))
+      })
+    }
+
+    const onStorage = (changes: { [key: string]: chrome.storage.StorageChange }, area: string) => {
+      if (area !== 'session') return
+      const change = changes[resultKey]
+      if (!change || change.newValue == null) return
+      const result = change.newValue as PasskeyBridgeStoredResult
+      finish(() => settleFromResult(result, resolve, reject))
     }
 
     chrome.runtime.onMessage.addListener(onMsg)
+    chrome.storage.onChanged.addListener(onStorage)
+
+    // Race: result may already be written before listeners attach.
+    void chrome.storage.session.get(resultKey).then((bag) => {
+      const existing = bag[resultKey] as PasskeyBridgeStoredResult | undefined
+      if (!existing || settled) return
+      finish(() => settleFromResult(existing, resolve, reject))
+    })
 
     chrome.storage.session.set({ [key]: payload }, () => {
       const last = chrome.runtime.lastError
       if (last) {
-        window.clearTimeout(to)
-        chrome.runtime.onMessage.removeListener(onMsg)
-        reject(new Error(last.message))
+        finish(() => reject(new Error(last.message)))
         return
       }
+      // Omit left/top — Wayland often rejects explicit bounds.
       chrome.windows.create(
         {
           url,
@@ -91,13 +141,45 @@ export async function openPasskeyBridgeAndWait(args: {
         () => {
           const wErr = chrome.runtime.lastError
           if (wErr) {
-            window.clearTimeout(to)
-            chrome.runtime.onMessage.removeListener(onMsg)
-            void chrome.storage.session.remove(key)
-            reject(new Error(wErr.message))
+            finish(() =>
+              reject(
+                new Error(
+                  wErr.message ||
+                    'Failed to open the passkey window. Try again, or use the side panel.'
+                )
+              )
+            )
           }
         }
       )
     })
   })
+}
+
+/** Persist ceremony outcome for waiters that missed the runtime message. */
+export async function publishPasskeyBridgeResult(args: {
+  ticket: string
+  ok: boolean
+  response?: unknown
+  error?: string
+}): Promise<void> {
+  const resultKey = passkeyBridgeResultStorageKey(args.ticket)
+  const stored: PasskeyBridgeStoredResult = {
+    ok: args.ok,
+    response: args.response,
+    error: args.error,
+    createdAt: Date.now(),
+  }
+  await chrome.storage.session.set({ [resultKey]: stored })
+  try {
+    await chrome.runtime.sendMessage({
+      type: LATCH_PASSKEY_BRIDGE_RESULT,
+      ticket: args.ticket,
+      ok: args.ok,
+      response: args.response,
+      error: args.error,
+    })
+  } catch {
+    // Parent may already be gone; storage fallback covers that.
+  }
 }

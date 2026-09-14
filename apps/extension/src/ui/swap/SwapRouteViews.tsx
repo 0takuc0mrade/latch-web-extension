@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import type {
   GetAssetIconDataUrlsRequest,
@@ -27,6 +27,7 @@ import {
   swapQuotePayloadToVm,
 } from '../swap/swapVm'
 import type { Route, Surface } from '../routing/routes'
+import { consumePendingWebauthnFlowIf, ensureDurableWalletUi } from '../webauthn/durableWalletUi'
 
 export type SwapOverlayFlags = {
   catalogLoading: boolean
@@ -73,6 +74,8 @@ export function SwapRouteViews({
     Record<string, number>
   >({})
   const [swapIconByCode, setSwapIconByCode] = useState<Record<string, string | null>>({})
+  const [autoResumeSwap, setAutoResumeSwap] = useState(false)
+  const skipDurableHandoffRef = useRef(false)
 
   const mapSwapTokenVm = useCallback(
     (t: {
@@ -287,7 +290,31 @@ export function SwapRouteViews({
   }
 
   async function handleConfirmSwap() {
-    if (!activeAccount?.id || !swapQuote) return
+    if (!activeAccount?.id || !swapQuote || !swapDraft) return
+
+    if (!skipDurableHandoffRef.current) {
+      try {
+        const handoff = await ensureDurableWalletUi({
+          surface,
+          pending: {
+            version: 1,
+            kind: 'swapConfirm',
+            route: 'swapConfirm',
+            autoResume: true,
+            createdAt: Date.now(),
+            draft: swapDraft,
+            quote: swapQuote,
+          },
+        })
+        if (handoff.relocated) return
+      } catch (e) {
+        setSwapFailureDetail(e instanceof Error ? e.message : String(e))
+        setSwapStep('failure')
+        return
+      }
+    }
+    skipDurableHandoffRef.current = false
+
     setSwapBusy(true)
     setSwapFailureDetail(null)
     try {
@@ -344,6 +371,30 @@ export function SwapRouteViews({
       setSwapBusy(false)
     }
   }
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const pending = await consumePendingWebauthnFlowIf('swapConfirm')
+      if (cancelled || !pending || !pending.autoResume) return
+      setSwapDraft(pending.draft)
+      setSwapQuote(pending.quote)
+      setSwapStep('confirm')
+      onSetRoute('swapConfirm')
+      setAutoResumeSwap(true)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [onSetRoute])
+
+  useEffect(() => {
+    if (!autoResumeSwap || !swapDraft || !swapQuote || !activeAccount?.id) return
+    setAutoResumeSwap(false)
+    skipDurableHandoffRef.current = true
+    void handleConfirmSwap()
+    // Intentionally only when auto-resume flag flips on with restored state.
+  }, [autoResumeSwap, swapDraft, swapQuote, activeAccount?.id])
 
   if (loading) return null
   if (route !== 'swap' && route !== 'swapConfirm') return null
